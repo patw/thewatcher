@@ -11,9 +11,8 @@ locally with RRD-style rollups, and serves a browser dashboard — all from one
 static binary. No cloud account, no external database, no telemetry.
 
 <p align="center">
-  <em><!-- TODO: screenshot of dashboard --></em>
-  <br>
-  <sub><strong>📸 Screenshot placeholder — coming soon</strong></sub>
+  <img src="screenshot1.png" alt="TheWatcher dashboard gauges" width="48%">
+  <img src="screenshot2.png" alt="TheWatcher dashboard charts" width="48%">
 </p>
 
 ---
