@@ -43,6 +43,9 @@ cargo build --release
 open http://127.0.0.1:8080
 ```
 
+See **[DEPLOYING.md](DEPLOYING.md)** for running as a service on Linux (systemd,
+OpenRC, runit), macOS (launchd), and Windows.
+
 ### Remote access over SSH (recommended)
 
 ```bash
