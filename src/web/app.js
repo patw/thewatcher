@@ -178,7 +178,7 @@ function updateDashboard(data) {
     const diskContainer = document.getElementById('disk-cards');
     diskContainer.innerHTML = (data.disks || []).map(d => `
         <div class="card disk-card">
-            <strong>${escapeHtml(d.mount)}</strong>
+            <strong title="${escapeHtml(d.mount)}">${escapeHtml(truncatePath(d.mount, 32))}</strong>
             <div style="font-size:0.8rem;color:var(--text-secondary)">${escapeHtml(d.filesystem || '')}</div>
             <div class="bar-bg"><div class="bar-fill" style="width:${d.used_percent.toFixed(1)}%"></div></div>
             <div class="detail">${fmtBytes(d.used_bytes)} / ${fmtBytes(d.total_bytes)} (${d.used_percent.toFixed(1)}%)</div>
@@ -250,6 +250,26 @@ function escapeHtml(str) {
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+}
+
+function truncatePath(path, maxLen) {
+    if (!path || path.length <= maxLen) return path;
+    // Keep the first segment and last segment, truncate middle
+    const parts = path.split('/');
+    if (parts.length <= 3) {
+        // Short path — just cut with ellipsis
+        return path.substring(0, maxLen - 1) + '…';
+    }
+    // Keep first segment(s) + last segment, fill middle with …/
+    const first = parts.slice(0, 2).join('/');
+    const last = parts[parts.length - 1];
+    // Build: /first/…/last, fit within maxLen
+    const head = first + '/…/';
+    const avail = maxLen - head.length;
+    if (avail > 4) {
+        return head + last.substring(last.length - avail);
+    }
+    return path.substring(0, maxLen - 1) + '…';
 }
 
 // ---- SVG Charts ----
