@@ -2,7 +2,7 @@
 
 **Self-hosted, single-binary system metrics viewer.**
 
-[![CI](https://github.com/beholder/thewatcher/actions/workflows/ci.yml/badge.svg)](https://github.com/beholder/thewatcher/actions/workflows/ci.yml)
+[![CI](https://github.com/patw/thewatcher/actions/workflows/ci.yml/badge.svg)](https://github.com/patw/thewatcher/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.80+-orange.svg)](https://www.rust-lang.org)
 
@@ -331,7 +331,7 @@ Embedded CSS and JavaScript. Served with `Cache-Control: public, max-age=3600`.
 
 ### Storage: MooFile
 
-Metrics are stored in five separate [MooFile](https://github.com/beholder/moofile)
+Metrics are stored in five separate [MooFile](https://github.com/patw/moofile)
 collections under the data directory:
 
 ```
@@ -377,12 +377,12 @@ deterministic `_id`, making rollup writes idempotent and restart-safe.
 ### Prerequisites
 
 - Rust 1.80+
-- The [moofile-core](https://github.com/beholder/moofile) crate accessible
+- The [moofile-core](https://github.com/patw/moofile) crate accessible
   locally (path dependency: `../moofile/core`)
 
 ```bash
 # Clone and build moofile first (if not already available)
-git clone https://github.com/beholder/moofile ../moofile
+git clone git@github.com:patw/moofile.git ../moofile
 
 # Build TheWatcher
 cd thewatcher
