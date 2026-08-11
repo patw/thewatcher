@@ -60,7 +60,7 @@ async fn test_health_endpoint() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["version"], "0.1.0");
+    assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(json["storage"], "ok");
     assert!(json["last_collection_ms"].is_null());
 }
@@ -85,7 +85,7 @@ async fn test_info_endpoint() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["version"], "0.1.0");
+    assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
     assert!(json["hostname"].is_string());
     assert!(json["os"].is_string());
     assert!(json["arch"].is_string());
