@@ -1,0 +1,59 @@
+[package]
+name = "thewatcher"
+version = "0.1.0"
+edition = "2021"
+description = "Self-hosted, single-binary system metrics viewer"
+license = "MIT"
+
+[[bin]]
+name = "thewatcher"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP server
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "timeout", "limit"] }
+tower = "0.5"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# System metrics
+sysinfo = "0.34"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Embedded assets
+rust-embed = "8"
+
+# Error handling
+thiserror = "2"
+
+# MooFile - local path, no default features (no autoembed)
+moofile = { path = "../moofile/core", default-features = false, package = "moofile-core" }
+bson = "2"
+
+# Utilities
+humantime = "2"
+humantime-serde = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tempfile = "3"
+
+[profile.release]
+opt-level = 2
+lto = true

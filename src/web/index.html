@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="system">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TheWatcher</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <header class="topbar">
+        <h1>TheWatcher</h1>
+        <div class="topbar-right">
+            <span id="hostname">—</span>
+            <span id="collection-time">—</span>
+            <button id="theme-toggle" title="Toggle theme">🌓</button>
+        </div>
+    </header>
+
+    <main class="dashboard">
+        <!-- Gauges row -->
+        <section class="gauges-row">
+            <div class="card gauge-card" id="cpu-gauge-card">
+                <h2>CPU</h2>
+                <div class="gauge-container">
+                    <svg viewBox="0 0 120 120" class="gauge-svg">
+                        <circle class="gauge-bg" cx="60" cy="60" r="50"/>
+                        <circle class="gauge-fill" id="cpu-gauge-fill" cx="60" cy="60" r="50"/>
+                    </svg>
+                    <div class="gauge-value" id="cpu-gauge-value">--</div>
+                </div>
+                <div class="gauge-detail" id="cpu-detail">Load: --</div>
+            </div>
+            <div class="card gauge-card" id="mem-gauge-card">
+                <h2>Memory</h2>
+                <div class="gauge-container">
+                    <svg viewBox="0 0 120 120" class="gauge-svg">
+                        <circle class="gauge-bg" cx="60" cy="60" r="50"/>
+                        <circle class="gauge-fill" id="mem-gauge-fill" cx="60" cy="60" r="50"/>
+                    </svg>
+                    <div class="gauge-value" id="mem-gauge-value">--</div>
+                </div>
+                <div class="gauge-detail" id="mem-detail">-- / --</div>
+            </div>
+            <div class="card info-card">
+                <h2>System</h2>
+                <table class="info-table">
+                    <tr><td>Host</td><td id="info-hostname">—</td></tr>
+                    <tr><td>OS</td><td id="info-os">—</td></tr>
+                    <tr><td>Version</td><td id="info-version">—</td></tr>
+                    <tr><td>Uptime</td><td id="info-uptime">—</td></tr>
+                    <tr><td>CPUs</td><td id="info-cpus">—</td></tr>
+                </table>
+            </div>
+        </section>
+
+        <!-- Disk cards -->
+        <section class="section">
+            <h2>Disks</h2>
+            <div class="cards-row" id="disk-cards"></div>
+        </section>
+
+        <!-- Network cards -->
+        <section class="section">
+            <h2>Network</h2>
+            <div class="cards-row" id="network-cards"></div>
+        </section>
+
+        <!-- Sockets cards -->
+        <section class="section">
+            <h2>Sockets</h2>
+            <div class="cards-row" id="socket-cards"></div>
+        </section>
+
+        <!-- Charts -->
+        <section class="section">
+            <h2>CPU History</h2>
+            <div class="chart-controls">
+                <select id="cpu-range">
+                    <option value="1h" selected>Last hour</option>
+                    <option value="24h">Last 24 hours</option>
+                    <option value="7d">Last 7 days</option>
+                    <option value="30d">Last 30 days</option>
+                </select>
+            </div>
+            <div class="chart-container" id="cpu-chart"></div>
+        </section>
+
+        <section class="section">
+            <h2>Memory History</h2>
+            <div class="chart-controls">
+                <select id="mem-range">
+                    <option value="1h" selected>Last hour</option>
+                    <option value="24h">Last 24 hours</option>
+                    <option value="7d">Last 7 days</option>
+                    <option value="30d">Last 30 days</option>
+                </select>
+            </div>
+            <div class="chart-container" id="mem-chart"></div>
+        </section>
+
+        <section class="section">
+            <h2>Network History</h2>
+            <div class="chart-controls">
+                <select id="net-range">
+                    <option value="1h" selected>Last hour</option>
+                    <option value="24h">Last 24 hours</option>
+                    <option value="7d">Last 7 days</option>
+                    <option value="30d">Last 30 days</option>
+                </select>
+            </div>
+            <div class="chart-container" id="net-chart"></div>
+        </section>
+
+        <section class="section">
+            <h2>Sockets History</h2>
+            <div class="chart-controls">
+                <select id="sock-range">
+                    <option value="1h" selected>Last hour</option>
+                    <option value="24h">Last 24 hours</option>
+                    <option value="7d">Last 7 days</option>
+                    <option value="30d">Last 30 days</option>
+                </select>
+            </div>
+            <div class="chart-container" id="sock-chart"></div>
+        </section>
+
+        <!-- Warnings -->
+        <section class="section" id="warnings-section" style="display:none;">
+            <h2>Collector Status</h2>
+            <div id="warnings-list"></div>
+        </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

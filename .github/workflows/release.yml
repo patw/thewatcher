@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x86_64
+            rust-target: x86_64-unknown-linux-gnu
+            suffix: ""
+          - os: ubuntu-latest
+            target: linux-aarch64
+            rust-target: aarch64-unknown-linux-gnu
+            suffix: ""
+          - os: windows-latest
+            target: windows-x86_64
+            rust-target: x86_64-pc-windows-msvc
+            suffix: ".exe"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: thewatcher
+
+      - name: Checkout moofile (path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: beholder/moofile
+          path: moofile
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Install cross-compiler (Linux ARM)
+        if: matrix.target == 'linux-aarch64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            thewatcher -> thewatcher/target
+            moofile/core -> moofile/core/target
+
+      - name: Build
+        working-directory: thewatcher
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --target ${{ matrix.rust-target }}
+
+      - name: Rename binary
+        shell: bash
+        run: |
+          cd thewatcher
+          BIN="target/${{ matrix.rust-target }}/release/thewatcher${{ matrix.suffix }}"
+          OUT="thewatcher-${{ matrix.target }}${{ matrix.suffix }}"
+          mv "$BIN" "../$OUT"
+          sha256sum "../$OUT" > "../$OUT.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: thewatcher-${{ matrix.target }}
+          path: |
+            thewatcher-${{ matrix.target }}${{ matrix.suffix }}
+            thewatcher-${{ matrix.target }}${{ matrix.suffix }}.sha256
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: thewatcher-*
+          path: dist/
+          merge-multiple: true
+
+      - name: Show artifacts
+        run: ls -lh dist/
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: false

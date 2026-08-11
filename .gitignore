@@ -1,0 +1,22 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+
+# MooFile runtime files
+*.bson.cache
+*.bson.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test data
+/tmp_test_data/
