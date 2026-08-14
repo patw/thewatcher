@@ -2,7 +2,23 @@
 
 All notable changes to TheWatcher will be documented in this file.
 
-## [0.1.0] — 2026-08-11
+## [0.1.2] — 2026-08-13
+
+### Fixed
+
+- **Network & sockets 24-hour history** — The rollup system only aggregated CPU
+  and memory metrics; network and sockets fell through an empty match arm, so
+  hourly+ rollup summaries were written with no meaningful data. Now properly
+  aggregates per-interface network rates (rx/tx bytes/sec) and sockets metrics
+  (process count, TCP/UDP inuse, total sockets) across all rollup resolutions.
+- Includes a one-time cleanup of stale empty rollup documents left by the bug.
+
+### Changed
+
+- `RollupDoc` extended with 30 new fields for network and sockets rollup data.
+- Rollup query API now supports optional `interface` and `mount` filters.
+
+[0.1.2]: https://github.com/beholder/thewatcher/releases/tag/v0.1.2
 
 ### Initial Release
 
