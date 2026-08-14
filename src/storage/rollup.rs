@@ -50,7 +50,14 @@ fn rollup_resolution(
 
     for &metric in &metrics {
         let last_rollup = storage.last_timestamp(dst_resolution, metric)?;
-        let start_from = last_rollup.unwrap_or(0);
+        // Defensive bound: if we have no resume point (e.g. a metric's rollup
+        // documents were lost), never scan back further than the granular
+        // retention window. Resuming from 0 (Unix epoch) meant a single
+        // missing/mis-serialized metric triggered ~500k per-bucket queries of
+        // the granular collection every maintenance cycle, pegging a CPU core.
+        // Granular retention defaults to 30 days, so this never drops data.
+        const MAX_LOOKBACK_MS: i64 = 30 * 86_400_000; // 30 days
+        let start_from = last_rollup.unwrap_or(now_ms - MAX_LOOKBACK_MS);
 
         // Align to bucket boundaries
         let mut bucket_start = align_down(start_from, bucket_ms);
@@ -227,6 +234,63 @@ fn compute_rollup(
 
             vec![rollup]
         }
+        "disk" => {
+            // Rollup disk usage into the mem_used_* fields. The history API
+            // already reads mem_used_* for disk rollup documents (see
+            // build_series_disk), so this keeps disk history working without
+            // adding dedicated disk fields. Disk rollups were accidentally
+            // dropped entirely in 0.1.2 (fell through to `_ => vec![]`).
+            let values: Vec<f64> = source_docs
+                .iter()
+                .filter_map(|d| d.get_f64("used_percent").ok())
+                .collect();
+
+            let mut rollup = RollupDoc {
+                id: format!("{}-{}-{}", metric, resolution.as_str(), bucket_start),
+                bucket_start_ms: bucket_start,
+                bucket_end_ms: bucket_end,
+                timestamp_ms: bucket_start,
+                metric: metric.to_string(),
+                resolution: resolution.as_str().to_string(),
+                sample_count,
+                cpu_min: None,
+                cpu_mean: None,
+                cpu_max: None,
+                load_1_min: None,
+                load_1_mean: None,
+                load_1_max: None,
+                mem_used_min: None,
+                mem_used_mean: None,
+                mem_used_max: None,
+                interface: None,
+                net_rx_min: None,
+                net_rx_mean: None,
+                net_rx_max: None,
+                net_tx_min: None,
+                net_tx_mean: None,
+                net_tx_max: None,
+                process_count_min: None,
+                process_count_mean: None,
+                process_count_max: None,
+                tcp_inuse_min: None,
+                tcp_inuse_mean: None,
+                tcp_inuse_max: None,
+                udp_inuse_min: None,
+                udp_inuse_mean: None,
+                udp_inuse_max: None,
+                total_sockets_min: None,
+                total_sockets_mean: None,
+                total_sockets_max: None,
+            };
+
+            if !values.is_empty() {
+                rollup.mem_used_min = min(&values);
+                rollup.mem_used_mean = Some(mean(&values));
+                rollup.mem_used_max = max(&values);
+            }
+
+            vec![rollup]
+        }
         "network" => {
             // Group source documents by interface
             let mut by_interface: std::collections::BTreeMap<String, Vec<&Document>> =
@@ -299,21 +363,26 @@ fn compute_rollup(
                 .collect()
         }
         "sockets" => {
+            // NOTE: granular sockets fields are `Option<u32>`, which BSON
+            // stores as int64. The 0.1.2 code read them with `get_i32()`, which
+            // silently failed, so every sockets rollup was written without
+            // tcp/udp/total values. `num_as_f64` handles int32, int64, and
+            // double, so this can't regress.
             let proc_vals: Vec<f64> = source_docs
                 .iter()
-                .filter_map(|d| d.get_i64("process_count").ok().map(|v| v as f64))
+                .filter_map(|d| num_as_f64(d, "process_count"))
                 .collect();
             let tcp_vals: Vec<f64> = source_docs
                 .iter()
-                .filter_map(|d| d.get_i32("tcp_inuse").ok().map(|v| v as f64))
+                .filter_map(|d| num_as_f64(d, "tcp_inuse"))
                 .collect();
             let udp_vals: Vec<f64> = source_docs
                 .iter()
-                .filter_map(|d| d.get_i32("udp_inuse").ok().map(|v| v as f64))
+                .filter_map(|d| num_as_f64(d, "udp_inuse"))
                 .collect();
             let sock_vals: Vec<f64> = source_docs
                 .iter()
-                .filter_map(|d| d.get_i32("total_sockets").ok().map(|v| v as f64))
+                .filter_map(|d| num_as_f64(d, "total_sockets"))
                 .collect();
 
             let rollup = RollupDoc {
@@ -360,6 +429,20 @@ fn compute_rollup(
     }
 }
 
+/// Extract a numeric field as f64 regardless of whether BSON stored it as
+/// int32, int64, or double.
+fn num_as_f64(doc: &Document, key: &str) -> Option<f64> {
+    if let Ok(v) = doc.get_i32(key) {
+        Some(v as f64)
+    } else if let Ok(v) = doc.get_i64(key) {
+        Some(v as f64)
+    } else if let Ok(v) = doc.get_f64(key) {
+        Some(v)
+    } else {
+        None
+    }
+}
+
 fn align_down(timestamp_ms: i64, bucket_ms: i64) -> i64 {
     (timestamp_ms / bucket_ms) * bucket_ms
 }
@@ -387,6 +470,17 @@ fn mean(values: &[f64]) -> f64 {
 /// written by a previous buggy version of the code. These have no meaningful
 /// data (all rollup fields are None) and would prevent new rollups from being
 /// written due to duplicate key errors.
+///
+/// These filters are safe against the fixed rollup writer:
+/// - network rollups always carry an `interface` field, so
+///   `interface: {$exists: false}` only matches pre-0.1.2 documents;
+/// - sockets rollups now always carry a `tcp_inuse_mean` value (the granular
+///   collector reliably reports TCP sockets), so the filter only matches the
+///   old empty documents and the 0.1.2 ones written by the get_i32 bug.
+///
+/// Even if a pathological platform ever produced sockets docs without
+/// `tcp_inuse_mean`, rollup_resolution()'s bounded lookback (see above) means
+/// a missing resume point can never trigger a from-epoch scan again.
 fn cleanup_stale_empty_rollups(storage: &Storage) -> Result<(), String> {
     // Only clean up the hourly resolution, since that's what had the bug.
     // Old network rollup docs have ID format "network-hourly-{ts}" (no interface).
@@ -443,5 +537,113 @@ mod tests {
         assert_eq!(max(&[1.0, 2.0, 3.0]), Some(3.0));
         assert_eq!(min(&[]), None);
         assert_eq!(max(&[]), None);
+    }
+
+    // Regression: v0.1.2 read granular sockets fields (stored as u32 → BSON
+    // int64) with get_i32(), silently producing empty rollups and ultimately
+    // the from-epoch rollup hot loop.
+    #[test]
+    fn test_compute_rollup_sockets_reads_int64_fields() {
+        use bson::{Bson, Document};
+
+        let mut d1 = Document::new();
+        d1.insert("tcp_inuse", Bson::Int64(100));
+        d1.insert("udp_inuse", Bson::Int64(40));
+        d1.insert("total_sockets", Bson::Int64(300));
+        d1.insert("process_count", Bson::Int64(42));
+
+        let mut d2 = Document::new();
+        d2.insert("tcp_inuse", Bson::Int64(120));
+        d2.insert("udp_inuse", Bson::Int64(60));
+        d2.insert("total_sockets", Bson::Int64(360));
+        d2.insert("process_count", Bson::Int64(46));
+
+        let rollups = compute_rollup(
+            "sockets",
+            &[d1, d2],
+            1_700_000_000_000,
+            1_700_003_600_000,
+            Resolution::Hourly,
+        );
+        assert_eq!(rollups.len(), 1);
+        let r = &rollups[0];
+        assert_eq!(r.tcp_inuse_mean, Some(110.0));
+        assert_eq!(r.tcp_inuse_min, Some(100.0));
+        assert_eq!(r.tcp_inuse_max, Some(120.0));
+        assert_eq!(r.udp_inuse_mean, Some(50.0));
+        assert_eq!(r.total_sockets_mean, Some(330.0));
+        assert_eq!(r.process_count_mean, Some(44.0));
+    }
+
+    // int32 values must keep working too (some collectors may emit them).
+    #[test]
+    fn test_compute_rollup_sockets_reads_int32_fields() {
+        use bson::{Bson, Document};
+
+        let mut d1 = Document::new();
+        d1.insert("tcp_inuse", Bson::Int32(100));
+        d1.insert("udp_inuse", Bson::Int32(40));
+        d1.insert("total_sockets", Bson::Int32(300));
+        d1.insert("process_count", Bson::Int64(42));
+
+        let rollups = compute_rollup(
+            "sockets",
+            &[d1],
+            1_700_000_000_000,
+            1_700_003_600_000,
+            Resolution::Hourly,
+        );
+        assert_eq!(rollups.len(), 1);
+        assert_eq!(rollups[0].tcp_inuse_mean, Some(100.0));
+        assert_eq!(rollups[0].udp_inuse_mean, Some(40.0));
+        assert_eq!(rollups[0].total_sockets_mean, Some(300.0));
+    }
+
+    #[test]
+    fn test_compute_rollup_network_groups_by_interface() {
+        use bson::{Bson, Document};
+
+        let mut d1 = Document::new();
+        d1.insert("interface", Bson::String("eth0".to_string()));
+        d1.insert("rx_bytes_per_sec", Bson::Double(1000.0));
+        d1.insert("tx_bytes_per_sec", Bson::Double(500.0));
+
+        let mut d2 = d1.clone();
+        d2.insert("rx_bytes_per_sec", Bson::Double(2000.0));
+        d2.insert("tx_bytes_per_sec", Bson::Double(600.0));
+
+        let mut d3 = Document::new();
+        d3.insert("interface", Bson::String("wlan0".to_string()));
+        d3.insert("rx_bytes_per_sec", Bson::Double(50.0));
+        d3.insert("tx_bytes_per_sec", Bson::Double(25.0));
+
+        let rollups = compute_rollup("network", &[d1, d2, d3], 0, 3_600_000, Resolution::Hourly);
+        assert_eq!(rollups.len(), 2);
+        // BTreeMap ordering: eth0 sorts before wlan0.
+        assert_eq!(rollups[0].interface.as_deref(), Some("eth0"));
+        assert_eq!(rollups[0].net_rx_mean, Some(1500.0));
+        assert_eq!(rollups[0].net_tx_mean, Some(550.0));
+        assert_eq!(rollups[1].interface.as_deref(), Some("wlan0"));
+        assert_eq!(rollups[1].net_rx_mean, Some(50.0));
+        assert_eq!(rollups[1].net_tx_mean, Some(25.0));
+    }
+
+    // Regression: 0.1.2 dropped the disk arm entirely (`_ => vec![]`), so disk
+    // rollups silently stopped being written.
+    #[test]
+    fn test_compute_rollup_disk_uses_used_percent() {
+        use bson::{Bson, Document};
+
+        let mut d1 = Document::new();
+        d1.insert("used_percent", Bson::Double(40.0));
+        let mut d2 = Document::new();
+        d2.insert("used_percent", Bson::Double(60.0));
+
+        let rollups = compute_rollup("disk", &[d1, d2], 0, 3_600_000, Resolution::Hourly);
+        assert_eq!(rollups.len(), 1);
+        let r = &rollups[0];
+        assert_eq!(r.mem_used_mean, Some(50.0));
+        assert_eq!(r.mem_used_min, Some(40.0));
+        assert_eq!(r.mem_used_max, Some(60.0));
     }
 }

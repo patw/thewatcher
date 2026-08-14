@@ -553,3 +553,195 @@ fn test_storage_stats() {
     let stats = storage.stats().unwrap();
     assert!(stats.granular_documents >= 5, "Should show at least 5 documents");
 }
+
+// ---------------------------------------------------------------------------
+// Sockets rollup regression (v0.1.2 get_i32 → empty rollup → hot loop)
+// ---------------------------------------------------------------------------
+
+/// Helper: create a test granular sockets document.
+fn make_sockets_doc(
+    id: &str,
+    ts: i64,
+    tcp: u32,
+    udp: u32,
+    total: u32,
+    procs: u64,
+) -> model::GranularSockets {
+    model::GranularSockets {
+        id: id.to_string(),
+        timestamp_ms: ts,
+        metric: "sockets".to_string(),
+        resolution: "granular".to_string(),
+        process_count: procs,
+        tcp_inuse: Some(tcp),
+        udp_inuse: Some(udp),
+        total_sockets: Some(total),
+    }
+}
+
+/// Helper: build a RollupDoc with every aggregate field None.
+fn make_rollup_doc(id: &str, metric: &str, ts: i64) -> model::RollupDoc {
+    model::RollupDoc {
+        id: id.to_string(),
+        bucket_start_ms: ts,
+        bucket_end_ms: ts + 3_600_000,
+        timestamp_ms: ts,
+        metric: metric.to_string(),
+        resolution: "hourly".to_string(),
+        sample_count: 120,
+        cpu_min: None,
+        cpu_mean: None,
+        cpu_max: None,
+        load_1_min: None,
+        load_1_mean: None,
+        load_1_max: None,
+        mem_used_min: None,
+        mem_used_mean: None,
+        mem_used_max: None,
+        interface: None,
+        net_rx_min: None,
+        net_rx_mean: None,
+        net_rx_max: None,
+        net_tx_min: None,
+        net_tx_mean: None,
+        net_tx_max: None,
+        process_count_min: None,
+        process_count_mean: None,
+        process_count_max: None,
+        tcp_inuse_min: None,
+        tcp_inuse_mean: None,
+        tcp_inuse_max: None,
+        udp_inuse_min: None,
+        udp_inuse_mean: None,
+        udp_inuse_max: None,
+        total_sockets_min: None,
+        total_sockets_mean: None,
+        total_sockets_max: None,
+    }
+}
+
+/// The core v0.1.2 regression: granular sockets values are `Option<u32>`
+/// (BSON int64), and the old code read them with get_i32(). This test drives
+/// the full pipeline and asserts the sockets rollup carries real values and
+/// that the resume point survives (the failure of which caused the from-epoch
+/// hot loop).
+#[test]
+fn test_rollup_sockets_writes_tcp_mean() {
+    let (storage, _dir) = open_temp_storage();
+
+    // A completed hour bucket, a couple of hours in the past.
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let bucket_start = (now_ms / 3_600_000 - 2) * 3_600_000;
+
+    for i in 0..10u32 {
+        let ts = bucket_start + i as i64 * 30_000;
+        let doc = make_sockets_doc(
+            &format!("sockets-{}", ts),
+            ts,
+            100 + i * 10,
+            40 + i,
+            300 + i,
+            42 + i as u64,
+        );
+        storage.write_granular_sockets(&doc).unwrap();
+    }
+
+    // Runs cleanup (must NOT delete the fresh rollup) then the rollups.
+    storage::rollup::run_rollups(&storage).unwrap();
+
+    // The hourly sockets rollup must exist with real values.
+    let docs = storage
+        .query_rollup("hourly", "sockets", bucket_start, bucket_start + 3_600_000, None, None)
+        .unwrap();
+    assert_eq!(docs.len(), 1, "Expected one sockets hourly rollup");
+    assert_eq!(docs[0].get_f64("tcp_inuse_mean").unwrap(), 145.0);
+    assert_eq!(docs[0].get_f64("udp_inuse_mean").unwrap(), 44.5);
+    assert_eq!(docs[0].get_f64("total_sockets_mean").unwrap(), 304.5);
+    assert_eq!(docs[0].get_f64("process_count_mean").unwrap(), 46.5);
+
+    // The resume point must stick — this is the invariant whose loss caused
+    // the v0.1.2 from-epoch hot loop.
+    let last = storage.last_timestamp("hourly", "sockets").unwrap();
+    assert_eq!(last, Some(bucket_start));
+}
+
+/// cleanup_stale_empty_rollups() must remove the stale empty docs written by
+/// the buggy versions while preserving valid rollups written by the fixed
+/// code. If it ever deleted the fresh docs, last_timestamp() would return
+/// None and the maintenance loop would re-scan from epoch (the v0.1.2 bug).
+#[test]
+fn test_cleanup_removes_stale_but_keeps_valid_rollups() {
+    let (storage, _dir) = open_temp_storage();
+    let ts: i64 = 1_700_000_000_000;
+
+    // Stale empty docs from the buggy 0.1.1/0.1.2 era.
+    let stale_net = make_rollup_doc(&format!("network-hourly-{}", ts), "network", ts);
+    storage.write_rollup("hourly", &stale_net).unwrap();
+    let stale_sock = make_rollup_doc(&format!("sockets-hourly-{}", ts), "sockets", ts);
+    storage.write_rollup("hourly", &stale_sock).unwrap();
+
+    // Fresh, correct docs as written by the fixed code.
+    let mut good_net = make_rollup_doc(&format!("network-hourly-{}-eth0", ts), "network", ts);
+    good_net.interface = Some("eth0".to_string());
+    good_net.net_rx_mean = Some(1000.0);
+    good_net.net_tx_mean = Some(500.0);
+    storage.write_rollup("hourly", &good_net).unwrap();
+
+    let mut good_sock = make_rollup_doc(
+        &format!("sockets-hourly-{}", ts + 3_600_000),
+        "sockets",
+        ts + 3_600_000,
+    );
+    good_sock.process_count_mean = Some(46.5);
+    good_sock.tcp_inuse_mean = Some(145.0);
+    good_sock.udp_inuse_mean = Some(44.5);
+    good_sock.total_sockets_mean = Some(304.5);
+    storage.write_rollup("hourly", &good_sock).unwrap();
+
+    // run_rollups performs the stale-doc cleanup first.
+    storage::rollup::run_rollups(&storage).unwrap();
+
+    // Stale docs removed, valid docs preserved.
+    let nets = storage
+        .query_rollup("hourly", "network", ts - 1000, ts + 1000, None, None)
+        .unwrap();
+    assert_eq!(nets.len(), 1, "Valid network rollup must survive cleanup");
+    assert_eq!(nets[0].get_str("interface").unwrap(), "eth0");
+
+    let socks = storage
+        .query_rollup("hourly", "sockets", ts, ts + 7_200_000, None, None)
+        .unwrap();
+    assert_eq!(socks.len(), 1, "Valid sockets rollup must survive cleanup");
+    assert_eq!(socks[0].get_f64("tcp_inuse_mean").unwrap(), 145.0);
+
+    // And the sockets resume point must still exist afterwards.
+    let last = storage.last_timestamp("hourly", "sockets").unwrap();
+    assert_eq!(last, Some(ts + 3_600_000));
+}
+
+/// Regression: 0.1.2 dropped the disk rollup arm, so disk history silently
+/// stopped being written. The fixed code rolls disk used_percent into the
+/// mem_used_* fields the history API already reads.
+#[test]
+fn test_rollup_disk_writes_used_percent() {
+    let (storage, _dir) = open_temp_storage();
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let bucket_start = (now_ms / 3_600_000 - 2) * 3_600_000;
+
+    for i in 0..6i64 {
+        let ts = bucket_start + i * 30_000;
+        let doc = make_disk_doc(&format!("disk-/-{}", ts), ts, "/", 40.0 + i as f64);
+        storage.write_granular_disk(&doc).unwrap();
+    }
+
+    storage::rollup::run_rollups(&storage).unwrap();
+
+    let docs = storage
+        .query_rollup("hourly", "disk", bucket_start, bucket_start + 3_600_000, None, None)
+        .unwrap();
+    assert_eq!(docs.len(), 1, "Expected one disk hourly rollup");
+    assert_eq!(docs[0].get_f64("mem_used_mean").unwrap(), 42.5);
+    assert_eq!(docs[0].get_f64("mem_used_min").unwrap(), 40.0);
+    assert_eq!(docs[0].get_f64("mem_used_max").unwrap(), 45.0);
+}

@@ -2,6 +2,36 @@
 
 All notable changes to TheWatcher will be documented in this file.
 
+## [0.1.3] — 2026-08-14
+
+### Fixed
+
+- **CPU hot loop (v0.1.2 regression)** — the sockets rollup read granular
+  `tcp_inuse`/`udp_inuse`/`total_sockets` fields (stored as `u32` → BSON int64)
+  with `get_i32()`, which always failed. Every sockets rollup was written
+  without those values, so the new stale-doc cleanup deleted each rollup as
+  soon as it was written, `last_timestamp()` never found a resume point, and
+  the rollup loop restarted from **Unix epoch** on every maintenance cycle —
+  roughly 500k per-bucket scans of the granular collection, pegging a CPU core
+  at 100% indefinitely. Rollups now read numeric fields regardless of BSON
+  int32/int64/double representation.
+- **Defensive bound on rollup resume** — if a metric ever lacks a resume point,
+  rollups now scan back at most the granular retention window (30 days)
+  instead of epoch, so this class of failure can no longer pin a core.
+- **Disk rollups accidentally dropped** — 0.1.2's rewrite removed the disk
+  match arm, so disk hourly+ summaries silently stopped being written. The
+  disk arm is restored (used_percent rolled into the `mem_used_*` fields the
+  history API already reads).
+- Stale-doc cleanup now only ever matches documents written by the buggy
+  versions; fresh rollups always carry the fields the cleanup checks for.
+
+### Added
+
+- Regression tests for sockets/network/disk rollup aggregation, the stale-doc
+  cleanup, and the resume-point invariant that protects against the hot loop.
+
+[0.1.3]: https://github.com/patw/thewatcher/releases/tag/v0.1.3
+
 ## [0.1.2] — 2026-08-13
 
 ### Fixed
@@ -18,7 +48,7 @@ All notable changes to TheWatcher will be documented in this file.
 - `RollupDoc` extended with 30 new fields for network and sockets rollup data.
 - Rollup query API now supports optional `interface` and `mount` filters.
 
-[0.1.2]: https://github.com/beholder/thewatcher/releases/tag/v0.1.2
+[0.1.2]: https://github.com/patw/thewatcher/releases/tag/v0.1.2
 
 ### Initial Release
 
@@ -42,4 +72,4 @@ who want local, durable machine visibility without cloud-based metrics services.
 - Cross-platform: Linux x86_64/aarch64, Windows x86_64/aarch64.
 - Licensed under MIT.
 
-[0.1.0]: https://github.com/beholder/thewatcher/releases/tag/v0.1.0
+[0.1.0]: https://github.com/patw/thewatcher/releases/tag/v0.1.0
