@@ -135,7 +135,14 @@ pub async fn api_history(
         }
         _ => state
             .storage
-            .query_rollup(resolution.as_str(), &params.metric, from_ms, until_ms)
+            .query_rollup(
+                resolution.as_str(),
+                &params.metric,
+                from_ms,
+                until_ms,
+                params.interface.as_deref(),
+                params.mount.as_deref(),
+            )
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?,
     };
 
@@ -359,18 +366,35 @@ fn build_series_disk(docs: &[&Document], resolution: &str) -> HistorySeries {
     }
 }
 
-fn build_series_net_rx(docs: &[&Document], _resolution: &str) -> HistorySeries {
+fn build_series_net_rx(docs: &[&Document], resolution: &str) -> HistorySeries {
     let points: Vec<HistoryPoint> = docs
         .iter()
         .filter_map(|d| {
             let ts = d.get_i64("timestamp_ms").ok()?;
-            d.get_f64("rx_bytes_per_sec").ok().map(|v| HistoryPoint {
-                timestamp_ms: ts,
-                min: None,
-                mean: None,
-                max: None,
-                value: Some(v),
-            })
+            if resolution == "granular" {
+                d.get_f64("rx_bytes_per_sec").ok().map(|v| HistoryPoint {
+                    timestamp_ms: ts,
+                    min: None,
+                    mean: None,
+                    max: None,
+                    value: Some(v),
+                })
+            } else {
+                let mean = d.get_f64("net_rx_mean").ok();
+                let min = d.get_f64("net_rx_min").ok();
+                let max = d.get_f64("net_rx_max").ok();
+                if mean.is_some() || min.is_some() {
+                    Some(HistoryPoint {
+                        timestamp_ms: ts,
+                        min,
+                        mean,
+                        max,
+                        value: None,
+                    })
+                } else {
+                    None
+                }
+            }
         })
         .collect();
 
@@ -381,18 +405,35 @@ fn build_series_net_rx(docs: &[&Document], _resolution: &str) -> HistorySeries {
     }
 }
 
-fn build_series_net_tx(docs: &[&Document], _resolution: &str) -> HistorySeries {
+fn build_series_net_tx(docs: &[&Document], resolution: &str) -> HistorySeries {
     let points: Vec<HistoryPoint> = docs
         .iter()
         .filter_map(|d| {
             let ts = d.get_i64("timestamp_ms").ok()?;
-            d.get_f64("tx_bytes_per_sec").ok().map(|v| HistoryPoint {
-                timestamp_ms: ts,
-                min: None,
-                mean: None,
-                max: None,
-                value: Some(v),
-            })
+            if resolution == "granular" {
+                d.get_f64("tx_bytes_per_sec").ok().map(|v| HistoryPoint {
+                    timestamp_ms: ts,
+                    min: None,
+                    mean: None,
+                    max: None,
+                    value: Some(v),
+                })
+            } else {
+                let mean = d.get_f64("net_tx_mean").ok();
+                let min = d.get_f64("net_tx_min").ok();
+                let max = d.get_f64("net_tx_max").ok();
+                if mean.is_some() || min.is_some() {
+                    Some(HistoryPoint {
+                        timestamp_ms: ts,
+                        min,
+                        mean,
+                        max,
+                        value: None,
+                    })
+                } else {
+                    None
+                }
+            }
         })
         .collect();
 
@@ -403,30 +444,52 @@ fn build_series_net_tx(docs: &[&Document], _resolution: &str) -> HistorySeries {
     }
 }
 
-fn build_series_sockets(docs: &[&Document], resolution: &str, field: &str, name: &str, unit: &str) -> HistorySeries {
+fn build_series_sockets(
+    docs: &[&Document],
+    resolution: &str,
+    field: &str,
+    name: &str,
+    unit: &str,
+) -> HistorySeries {
     let points: Vec<HistoryPoint> = docs
         .iter()
         .filter_map(|d| {
             let ts = d.get_i64("timestamp_ms").ok()?;
             if resolution == "granular" {
-                d.get_i32(field).ok().map(|v| HistoryPoint {
-                    timestamp_ms: ts,
-                    min: None,
-                    mean: None,
-                    max: None,
-                    value: Some(v as f64),
-                })
-                    .or_else(|| {
-                        d.get_i64(field).ok().map(|v| HistoryPoint {
-                            timestamp_ms: ts,
-                            min: None,
-                            mean: None,
-                            max: None,
-                            value: Some(v as f64),
-                        })
+                d.get_i32(field)
+                    .ok()
+                    .map(|v| v as f64)
+                    .or_else(|| d.get_i64(field).ok().map(|v| v as f64))
+                    .map(|v| HistoryPoint {
+                        timestamp_ms: ts,
+                        min: None,
+                        mean: None,
+                        max: None,
+                        value: Some(v),
                     })
             } else {
-                None
+                // Map granular field name to rollup field names
+                let (mean_field, min_field, max_field) = match field {
+                    "process_count" => ("process_count_mean", "process_count_min", "process_count_max"),
+                    "tcp_inuse" => ("tcp_inuse_mean", "tcp_inuse_min", "tcp_inuse_max"),
+                    "udp_inuse" => ("udp_inuse_mean", "udp_inuse_min", "udp_inuse_max"),
+                    "total_sockets" => ("total_sockets_mean", "total_sockets_min", "total_sockets_max"),
+                    _ => return None,
+                };
+                let mean = d.get_f64(mean_field).ok();
+                let min = d.get_f64(min_field).ok();
+                let max = d.get_f64(max_field).ok();
+                if mean.is_some() || min.is_some() {
+                    Some(HistoryPoint {
+                        timestamp_ms: ts,
+                        min,
+                        mean,
+                        max,
+                        value: None,
+                    })
+                } else {
+                    None
+                }
             }
         })
         .collect();

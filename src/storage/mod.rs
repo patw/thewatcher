@@ -174,13 +174,22 @@ impl Storage {
         metric: &str,
         from_ms: i64,
         until_ms: i64,
+        interface: Option<&str>,
+        mount: Option<&str>,
     ) -> Result<Vec<Document>, String> {
         let collection = self.collection_for_resolution(resolution)?;
 
-        let filter = doc! {
+        let mut filter = doc! {
             "metric": metric,
             "timestamp_ms": { "$gte": from_ms, "$lte": until_ms },
         };
+
+        if let Some(iface) = interface {
+            filter.insert("interface", iface);
+        }
+        if let Some(mnt) = mount {
+            filter.insert("mount", mnt);
+        }
 
         let docs = collection
             .find(filter)
@@ -274,6 +283,15 @@ impl Storage {
     }
     pub fn yearly_collection(&self) -> &Collection {
         &self.yearly
+    }
+
+    /// Delete documents matching a filter from the given resolution collection.
+    pub fn delete_many(&self, resolution: &str, filter: bson::Document) -> Result<u64, String> {
+        let collection = self.collection_for_resolution(resolution)?;
+        let deleted = collection
+            .delete_many(filter)
+            .map_err(|e| format!("delete_many {}: {}", resolution, e))?;
+        Ok(deleted as u64)
     }
 }
 

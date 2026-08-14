@@ -187,6 +187,27 @@ pub struct RollupDoc {
     pub mem_used_min: Option<f64>,
     pub mem_used_mean: Option<f64>,
     pub mem_used_max: Option<f64>,
+    // Network rollup fields (per-interface)
+    pub interface: Option<String>,
+    pub net_rx_min: Option<f64>,
+    pub net_rx_mean: Option<f64>,
+    pub net_rx_max: Option<f64>,
+    pub net_tx_min: Option<f64>,
+    pub net_tx_mean: Option<f64>,
+    pub net_tx_max: Option<f64>,
+    // Sockets / process rollup fields
+    pub process_count_min: Option<f64>,
+    pub process_count_mean: Option<f64>,
+    pub process_count_max: Option<f64>,
+    pub tcp_inuse_min: Option<f64>,
+    pub tcp_inuse_mean: Option<f64>,
+    pub tcp_inuse_max: Option<f64>,
+    pub udp_inuse_min: Option<f64>,
+    pub udp_inuse_mean: Option<f64>,
+    pub udp_inuse_max: Option<f64>,
+    pub total_sockets_min: Option<f64>,
+    pub total_sockets_mean: Option<f64>,
+    pub total_sockets_max: Option<f64>,
 }
 
 // ---------------------------------------------------------------------------

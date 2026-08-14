@@ -9,6 +9,10 @@ use tracing;
 pub fn run_rollups(storage: &Storage) -> Result<i64, String> {
     let now_ms = chrono::Utc::now().timestamp_millis();
 
+    // Clean up stale empty rollup documents that may have been written by an
+    // earlier buggy version (before network/sockets rollup was implemented).
+    cleanup_stale_empty_rollups(storage)?;
+
     // Granular → Hourly
     rollup_resolution(storage, "granular", "hourly", Resolution::Hourly)?;
 
@@ -64,6 +68,8 @@ fn rollup_resolution(
                 metric,
                 bucket_start,
                 bucket_end,
+                None, // no interface filter for rollup
+                None, // no mount filter for rollup
             )?;
 
             if source_docs.is_empty() {
@@ -71,9 +77,9 @@ fn rollup_resolution(
                 continue;
             }
 
-            // Compute rollup
-            if let Some(rollup) = compute_rollup(metric, &source_docs, bucket_start, bucket_end, dst)
-            {
+            // Compute rollup(s)
+            let rollups = compute_rollup(metric, &source_docs, bucket_start, bucket_end, dst);
+            for rollup in rollups {
                 storage.write_rollup(dst_resolution, &rollup)?;
                 tracing::debug!(
                     "Rollup: {} {} bucket {} ({} samples)",
@@ -91,43 +97,21 @@ fn rollup_resolution(
     Ok(())
 }
 
-/// Compute a single rollup document from source documents.
+/// Compute rollup document(s) from source documents.
+///
+/// Returns one document per metric (or per interface for network).
 fn compute_rollup(
     metric: &str,
     source_docs: &[Document],
     bucket_start: i64,
     bucket_end: i64,
     resolution: Resolution,
-) -> Option<RollupDoc> {
+) -> Vec<RollupDoc> {
     if source_docs.is_empty() {
-        return None;
+        return vec![];
     }
 
     let sample_count = source_docs.len() as u64;
-
-    let mut rollup = RollupDoc {
-        id: format!(
-            "{}-{}-{}",
-            metric,
-            resolution.as_str(),
-            bucket_start
-        ),
-        bucket_start_ms: bucket_start,
-        bucket_end_ms: bucket_end,
-        timestamp_ms: bucket_start,
-        metric: metric.to_string(),
-        resolution: resolution.as_str().to_string(),
-        sample_count,
-        cpu_min: None,
-        cpu_mean: None,
-        cpu_max: None,
-        load_1_min: None,
-        load_1_mean: None,
-        load_1_max: None,
-        mem_used_min: None,
-        mem_used_mean: None,
-        mem_used_max: None,
-    };
 
     match metric {
         "cpu" => {
@@ -140,6 +124,44 @@ fn compute_rollup(
                 .filter_map(|d| d.get_f64("load_1").ok())
                 .collect();
 
+            let mut rollup = RollupDoc {
+                id: format!("{}-{}-{}", metric, resolution.as_str(), bucket_start),
+                bucket_start_ms: bucket_start,
+                bucket_end_ms: bucket_end,
+                timestamp_ms: bucket_start,
+                metric: metric.to_string(),
+                resolution: resolution.as_str().to_string(),
+                sample_count,
+                cpu_min: None,
+                cpu_mean: None,
+                cpu_max: None,
+                load_1_min: None,
+                load_1_mean: None,
+                load_1_max: None,
+                mem_used_min: None,
+                mem_used_mean: None,
+                mem_used_max: None,
+                interface: None,
+                net_rx_min: None,
+                net_rx_mean: None,
+                net_rx_max: None,
+                net_tx_min: None,
+                net_tx_mean: None,
+                net_tx_max: None,
+                process_count_min: None,
+                process_count_mean: None,
+                process_count_max: None,
+                tcp_inuse_min: None,
+                tcp_inuse_mean: None,
+                tcp_inuse_max: None,
+                udp_inuse_min: None,
+                udp_inuse_mean: None,
+                udp_inuse_max: None,
+                total_sockets_min: None,
+                total_sockets_mean: None,
+                total_sockets_max: None,
+            };
+
             if !values.is_empty() {
                 rollup.cpu_min = min(&values);
                 rollup.cpu_mean = Some(mean(&values));
@@ -150,22 +172,192 @@ fn compute_rollup(
                 rollup.load_1_mean = Some(mean(&loads_1));
                 rollup.load_1_max = max(&loads_1);
             }
+
+            vec![rollup]
         }
         "memory" => {
             let values: Vec<f64> = source_docs
                 .iter()
                 .filter_map(|d| d.get_f64("used_percent").ok())
                 .collect();
+
+            let mut rollup = RollupDoc {
+                id: format!("{}-{}-{}", metric, resolution.as_str(), bucket_start),
+                bucket_start_ms: bucket_start,
+                bucket_end_ms: bucket_end,
+                timestamp_ms: bucket_start,
+                metric: metric.to_string(),
+                resolution: resolution.as_str().to_string(),
+                sample_count,
+                cpu_min: None,
+                cpu_mean: None,
+                cpu_max: None,
+                load_1_min: None,
+                load_1_mean: None,
+                load_1_max: None,
+                mem_used_min: None,
+                mem_used_mean: None,
+                mem_used_max: None,
+                interface: None,
+                net_rx_min: None,
+                net_rx_mean: None,
+                net_rx_max: None,
+                net_tx_min: None,
+                net_tx_mean: None,
+                net_tx_max: None,
+                process_count_min: None,
+                process_count_mean: None,
+                process_count_max: None,
+                tcp_inuse_min: None,
+                tcp_inuse_mean: None,
+                tcp_inuse_max: None,
+                udp_inuse_min: None,
+                udp_inuse_mean: None,
+                udp_inuse_max: None,
+                total_sockets_min: None,
+                total_sockets_mean: None,
+                total_sockets_max: None,
+            };
+
             if !values.is_empty() {
                 rollup.mem_used_min = min(&values);
                 rollup.mem_used_mean = Some(mean(&values));
                 rollup.mem_used_max = max(&values);
             }
-        }
-        _ => {}
-    }
 
-    Some(rollup)
+            vec![rollup]
+        }
+        "network" => {
+            // Group source documents by interface
+            let mut by_interface: std::collections::BTreeMap<String, Vec<&Document>> =
+                std::collections::BTreeMap::new();
+            for doc in source_docs {
+                if let Ok(iface) = doc.get_str("interface") {
+                    by_interface
+                        .entry(iface.to_string())
+                        .or_default()
+                        .push(doc);
+                }
+            }
+
+            by_interface
+                .into_iter()
+                .map(|(iface, docs)| {
+                    let rx_vals: Vec<f64> = docs
+                        .iter()
+                        .filter_map(|d| d.get_f64("rx_bytes_per_sec").ok())
+                        .collect();
+                    let tx_vals: Vec<f64> = docs
+                        .iter()
+                        .filter_map(|d| d.get_f64("tx_bytes_per_sec").ok())
+                        .collect();
+
+                    RollupDoc {
+                        id: format!(
+                            "{}-{}-{}-{}",
+                            metric,
+                            resolution.as_str(),
+                            bucket_start,
+                            iface
+                        ),
+                        bucket_start_ms: bucket_start,
+                        bucket_end_ms: bucket_end,
+                        timestamp_ms: bucket_start,
+                        metric: metric.to_string(),
+                        resolution: resolution.as_str().to_string(),
+                        sample_count: docs.len() as u64,
+                        cpu_min: None,
+                        cpu_mean: None,
+                        cpu_max: None,
+                        load_1_min: None,
+                        load_1_mean: None,
+                        load_1_max: None,
+                        mem_used_min: None,
+                        mem_used_mean: None,
+                        mem_used_max: None,
+                        interface: Some(iface),
+                        net_rx_min: if rx_vals.is_empty() { None } else { min(&rx_vals) },
+                        net_rx_mean: if rx_vals.is_empty() { None } else { Some(mean(&rx_vals)) },
+                        net_rx_max: if rx_vals.is_empty() { None } else { max(&rx_vals) },
+                        net_tx_min: if tx_vals.is_empty() { None } else { min(&tx_vals) },
+                        net_tx_mean: if tx_vals.is_empty() { None } else { Some(mean(&tx_vals)) },
+                        net_tx_max: if tx_vals.is_empty() { None } else { max(&tx_vals) },
+                        process_count_min: None,
+                        process_count_mean: None,
+                        process_count_max: None,
+                        tcp_inuse_min: None,
+                        tcp_inuse_mean: None,
+                        tcp_inuse_max: None,
+                        udp_inuse_min: None,
+                        udp_inuse_mean: None,
+                        udp_inuse_max: None,
+                        total_sockets_min: None,
+                        total_sockets_mean: None,
+                        total_sockets_max: None,
+                    }
+                })
+                .collect()
+        }
+        "sockets" => {
+            let proc_vals: Vec<f64> = source_docs
+                .iter()
+                .filter_map(|d| d.get_i64("process_count").ok().map(|v| v as f64))
+                .collect();
+            let tcp_vals: Vec<f64> = source_docs
+                .iter()
+                .filter_map(|d| d.get_i32("tcp_inuse").ok().map(|v| v as f64))
+                .collect();
+            let udp_vals: Vec<f64> = source_docs
+                .iter()
+                .filter_map(|d| d.get_i32("udp_inuse").ok().map(|v| v as f64))
+                .collect();
+            let sock_vals: Vec<f64> = source_docs
+                .iter()
+                .filter_map(|d| d.get_i32("total_sockets").ok().map(|v| v as f64))
+                .collect();
+
+            let rollup = RollupDoc {
+                id: format!("{}-{}-{}", metric, resolution.as_str(), bucket_start),
+                bucket_start_ms: bucket_start,
+                bucket_end_ms: bucket_end,
+                timestamp_ms: bucket_start,
+                metric: metric.to_string(),
+                resolution: resolution.as_str().to_string(),
+                sample_count,
+                cpu_min: None,
+                cpu_mean: None,
+                cpu_max: None,
+                load_1_min: None,
+                load_1_mean: None,
+                load_1_max: None,
+                mem_used_min: None,
+                mem_used_mean: None,
+                mem_used_max: None,
+                interface: None,
+                net_rx_min: None,
+                net_rx_mean: None,
+                net_rx_max: None,
+                net_tx_min: None,
+                net_tx_mean: None,
+                net_tx_max: None,
+                process_count_min: if proc_vals.is_empty() { None } else { min(&proc_vals) },
+                process_count_mean: if proc_vals.is_empty() { None } else { Some(mean(&proc_vals)) },
+                process_count_max: if proc_vals.is_empty() { None } else { max(&proc_vals) },
+                tcp_inuse_min: if tcp_vals.is_empty() { None } else { min(&tcp_vals) },
+                tcp_inuse_mean: if tcp_vals.is_empty() { None } else { Some(mean(&tcp_vals)) },
+                tcp_inuse_max: if tcp_vals.is_empty() { None } else { max(&tcp_vals) },
+                udp_inuse_min: if udp_vals.is_empty() { None } else { min(&udp_vals) },
+                udp_inuse_mean: if udp_vals.is_empty() { None } else { Some(mean(&udp_vals)) },
+                udp_inuse_max: if udp_vals.is_empty() { None } else { max(&udp_vals) },
+                total_sockets_min: if sock_vals.is_empty() { None } else { min(&sock_vals) },
+                total_sockets_mean: if sock_vals.is_empty() { None } else { Some(mean(&sock_vals)) },
+                total_sockets_max: if sock_vals.is_empty() { None } else { max(&sock_vals) },
+            };
+
+            vec![rollup]
+        }
+        _ => vec![],
+    }
 }
 
 fn align_down(timestamp_ms: i64, bucket_ms: i64) -> i64 {
@@ -189,6 +381,43 @@ fn mean(values: &[f64]) -> f64 {
         return 0.0;
     }
     values.iter().sum::<f64>() / values.len() as f64
+}
+
+/// Remove stale empty rollup documents for network and sockets that were
+/// written by a previous buggy version of the code. These have no meaningful
+/// data (all rollup fields are None) and would prevent new rollups from being
+/// written due to duplicate key errors.
+fn cleanup_stale_empty_rollups(storage: &Storage) -> Result<(), String> {
+    // Only clean up the hourly resolution, since that's what had the bug.
+    // Old network rollup docs have ID format "network-hourly-{ts}" (no interface).
+    // We identify them by: metric=network, interface field missing.
+    let net_filter = bson::doc! {
+        "metric": "network",
+        "interface": { "$exists": false },
+    };
+    let deleted_net = storage.delete_many("hourly", net_filter)?;
+    if deleted_net > 0 {
+        tracing::info!(
+            "Cleaned up {} stale empty network rollup document(s)",
+            deleted_net
+        );
+    }
+
+    // Old sockets rollup docs have ID format "sockets-hourly-{ts}" and have no
+    // tcp_inuse_mean field (since the old code never set it).
+    let sock_filter = bson::doc! {
+        "metric": "sockets",
+        "tcp_inuse_mean": { "$exists": false },
+    };
+    let deleted_sock = storage.delete_many("hourly", sock_filter)?;
+    if deleted_sock > 0 {
+        tracing::info!(
+            "Cleaned up {} stale empty sockets rollup document(s)",
+            deleted_sock
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

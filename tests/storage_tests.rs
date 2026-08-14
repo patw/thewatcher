@@ -305,6 +305,25 @@ fn test_rollup_idempotent() {
         mem_used_min: None,
         mem_used_mean: None,
         mem_used_max: None,
+        interface: None,
+        net_rx_min: None,
+        net_rx_mean: None,
+        net_rx_max: None,
+        net_tx_min: None,
+        net_tx_mean: None,
+        net_tx_max: None,
+        process_count_min: None,
+        process_count_mean: None,
+        process_count_max: None,
+        tcp_inuse_min: None,
+        tcp_inuse_mean: None,
+        tcp_inuse_max: None,
+        udp_inuse_min: None,
+        udp_inuse_mean: None,
+        udp_inuse_max: None,
+        total_sockets_min: None,
+        total_sockets_mean: None,
+        total_sockets_max: None,
     };
 
     // First insert
@@ -315,7 +334,7 @@ fn test_rollup_idempotent() {
 
     // Should have exactly one document
     let docs = storage
-        .query_rollup("hourly", "cpu", 1_700_000_000_000, 1_700_010_000_000)
+        .query_rollup("hourly", "cpu", 1_700_000_000_000, 1_700_010_000_000, None, None)
         .unwrap();
     assert_eq!(docs.len(), 1, "Rollup should be idempotent");
     assert_eq!(docs[0].get_f64("cpu_mean").unwrap(), 31.4);
