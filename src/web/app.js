@@ -311,13 +311,27 @@ function drawChart(containerId, data, seriesConfig) {
 
     const timeMin = Math.min(...allTimes);
     const timeMax = Math.max(...allTimes);
-    const valMin = Math.min(...allValues);
-    const valMax = Math.max(...allValues);
-    const valRange = (valMax - valMin) || 1;
-    const valPad = valRange * 0.1;
+    const rawMin = Math.min(...allValues);
+    const rawMax = Math.max(...allValues);
+    const rawRange = (rawMax - rawMin) || 1;
+    const pad = rawRange * 0.1;
+
+    // Y-axis bounds. Percent metrics are pinned to a fixed 0-100 range so
+    // they don't get auto-zoomed onto just the spread of the data; every other
+    // metric here (CPU/memory/disk %, byte rates, process/socket counts, load)
+    // is inherently non-negative, so the axis is clamped to never dip below 0.
+    let axisMin, axisMax;
+    if (du.unit === 'percent') {
+        axisMin = 0;
+        axisMax = 100;
+    } else {
+        axisMin = Math.max(0, rawMin - pad);
+        axisMax = rawMax + pad;
+    }
+    const axisRange = (axisMax - axisMin) || 1;
 
     const xScale = t => margin.left + ((t - timeMin) / (timeMax - timeMin || 1)) * width;
-    const yScale = v => margin.top + height - ((v - (valMin - valPad)) / (valRange + 2 * valPad)) * height;
+    const yScale = v => margin.top + height - ((v - axisMin) / axisRange) * height;
 
     // Build SVG
     let svg = `<svg viewBox="0 0 ${width + margin.left + margin.right} ${height + margin.top + margin.bottom}">`;
@@ -325,7 +339,7 @@ function drawChart(containerId, data, seriesConfig) {
     // Grid lines + Y-axis labels (display-unit values)
     for (let i = 0; i <= 4; i++) {
         const y = margin.top + (height * i / 4);
-        const val = (valMin - valPad) + (valRange + 2 * valPad) * (1 - i / 4);
+        const val = axisMin + axisRange * (1 - i / 4);
         svg += `<line x1="${margin.left}" y1="${y}" x2="${margin.left + width}" y2="${y}" stroke="var(--chart-grid)" stroke-width="0.5"/>`;
         svg += `<text x="${margin.left - 6}" y="${y + 4}" fill="var(--text-secondary)" font-size="10" text-anchor="end">${val.toFixed(1)}</text>`;
     }

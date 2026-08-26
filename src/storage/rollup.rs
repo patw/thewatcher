@@ -13,6 +13,11 @@ pub fn run_rollups(storage: &Storage) -> Result<i64, String> {
     // earlier buggy version (before network/sockets rollup was implemented).
     cleanup_stale_empty_rollups(storage)?;
 
+    // Clean up empty daily/monthly/yearly rollups written before the
+    // multi-level rollup aggregation bug was fixed (see
+    // compute_rollup_from_rollup).
+    cleanup_empty_upper_rollups(storage)?;
+
     // Granular → Hourly
     rollup_resolution(storage, "granular", "hourly", Resolution::Hourly)?;
 
@@ -85,7 +90,8 @@ fn rollup_resolution(
             }
 
             // Compute rollup(s)
-            let rollups = compute_rollup(metric, &source_docs, bucket_start, bucket_end, dst);
+            let rollups =
+                compute_rollup(metric, &source_docs, bucket_start, bucket_end, dst, src_resolution);
             for rollup in rollups {
                 storage.write_rollup(dst_resolution, &rollup)?;
                 tracing::debug!(
@@ -107,15 +113,27 @@ fn rollup_resolution(
 /// Compute rollup document(s) from source documents.
 ///
 /// Returns one document per metric (or per interface for network).
+///
+/// The source resolution matters: rolling up from `granular` aggregates raw
+/// samples (`cpu_percent`, `used_percent`, `rx_bytes_per_sec`, …), while
+/// rolling up from any other resolution aggregates already-aggregated
+/// min/mean/max fields (`cpu_min`/`cpu_mean`/`cpu_max`, …). Reading the wrong
+/// field names produces empty rollups — this was the root cause of 7d/30d
+/// history being empty (they resolve to the `daily` collection).
 fn compute_rollup(
     metric: &str,
     source_docs: &[Document],
     bucket_start: i64,
     bucket_end: i64,
     resolution: Resolution,
+    src_resolution: &str,
 ) -> Vec<RollupDoc> {
     if source_docs.is_empty() {
         return vec![];
+    }
+
+    if src_resolution != "granular" {
+        return compute_rollup_from_rollup(metric, source_docs, bucket_start, bucket_end, resolution);
     }
 
     let sample_count = source_docs.len() as u64;
@@ -429,6 +447,252 @@ fn compute_rollup(
     }
 }
 
+/// Compute a rollup from already-rolled-up source documents (hourly → daily,
+/// daily → monthly, monthly → yearly).
+///
+/// Source documents here store min/mean/max aggregates under `*_min`,
+/// `*_mean`, `*_max` field names, plus a `sample_count`. To merge them we take
+/// the min-of-mins, the max-of-maxes, and a `sample_count`-weighted mean of
+/// the per-bucket means (the correct merge of two arithmetic means).
+fn compute_rollup_from_rollup(
+    metric: &str,
+    source_docs: &[Document],
+    bucket_start: i64,
+    bucket_end: i64,
+    resolution: Resolution,
+) -> Vec<RollupDoc> {
+    match metric {
+        "cpu" => {
+            let mut rollup = empty_rollup(metric, resolution, bucket_start, bucket_end, None);
+            let (mn, me, mx, samples) =
+                aggregate_rollup(source_docs.iter(), "cpu_min", "cpu_mean", "cpu_max");
+            rollup.sample_count = samples;
+            rollup.cpu_min = mn;
+            rollup.cpu_mean = me;
+            rollup.cpu_max = mx;
+
+            let (mn, me, mx, _) =
+                aggregate_rollup(source_docs.iter(), "load_1_min", "load_1_mean", "load_1_max");
+            rollup.load_1_min = mn;
+            rollup.load_1_mean = me;
+            rollup.load_1_max = mx;
+
+            vec![rollup]
+        }
+        // Disk usage is stored in the mem_used_* fields (see compute_rollup),
+        // so disk rollups aggregate exactly like memory.
+        "memory" | "disk" => {
+            let mut rollup = empty_rollup(metric, resolution, bucket_start, bucket_end, None);
+            let (mn, me, mx, samples) =
+                aggregate_rollup(source_docs.iter(), "mem_used_min", "mem_used_mean", "mem_used_max");
+            rollup.sample_count = samples;
+            rollup.mem_used_min = mn;
+            rollup.mem_used_mean = me;
+            rollup.mem_used_max = mx;
+
+            vec![rollup]
+        }
+        "network" => {
+            // Group source documents by interface (same as the granular path).
+            let mut by_interface: std::collections::BTreeMap<String, Vec<&Document>> =
+                std::collections::BTreeMap::new();
+            for doc in source_docs {
+                if let Ok(iface) = doc.get_str("interface") {
+                    by_interface
+                        .entry(iface.to_string())
+                        .or_default()
+                        .push(doc);
+                }
+            }
+
+            by_interface
+                .into_iter()
+                .map(|(iface, docs)| {
+                    let mut rollup =
+                        empty_rollup(metric, resolution, bucket_start, bucket_end, Some(&iface));
+                    rollup.interface = Some(iface);
+
+                    let (mn, me, mx, samples) =
+                        aggregate_rollup(docs.iter().copied(), "net_rx_min", "net_rx_mean", "net_rx_max");
+                    rollup.sample_count = samples;
+                    rollup.net_rx_min = mn;
+                    rollup.net_rx_mean = me;
+                    rollup.net_rx_max = mx;
+
+                    let (mn, me, mx, _) =
+                        aggregate_rollup(docs.iter().copied(), "net_tx_min", "net_tx_mean", "net_tx_max");
+                    rollup.net_tx_min = mn;
+                    rollup.net_tx_mean = me;
+                    rollup.net_tx_max = mx;
+
+                    rollup
+                })
+                .collect()
+        }
+        "sockets" => {
+            let mut rollup = empty_rollup(metric, resolution, bucket_start, bucket_end, None);
+
+            let (mn, me, mx, samples) = aggregate_rollup(
+                source_docs.iter(),
+                "process_count_min",
+                "process_count_mean",
+                "process_count_max",
+            );
+            rollup.sample_count = samples;
+            rollup.process_count_min = mn;
+            rollup.process_count_mean = me;
+            rollup.process_count_max = mx;
+
+            let (mn, me, mx, _) =
+                aggregate_rollup(source_docs.iter(), "tcp_inuse_min", "tcp_inuse_mean", "tcp_inuse_max");
+            rollup.tcp_inuse_min = mn;
+            rollup.tcp_inuse_mean = me;
+            rollup.tcp_inuse_max = mx;
+
+            let (mn, me, mx, _) =
+                aggregate_rollup(source_docs.iter(), "udp_inuse_min", "udp_inuse_mean", "udp_inuse_max");
+            rollup.udp_inuse_min = mn;
+            rollup.udp_inuse_mean = me;
+            rollup.udp_inuse_max = mx;
+
+            let (mn, me, mx, _) = aggregate_rollup(
+                source_docs.iter(),
+                "total_sockets_min",
+                "total_sockets_mean",
+                "total_sockets_max",
+            );
+            rollup.total_sockets_min = mn;
+            rollup.total_sockets_mean = me;
+            rollup.total_sockets_max = mx;
+
+            vec![rollup]
+        }
+        _ => vec![],
+    }
+}
+
+/// Build a rollup document with all aggregate fields unset (`None`).
+fn empty_rollup(
+    metric: &str,
+    resolution: Resolution,
+    bucket_start: i64,
+    bucket_end: i64,
+    id_suffix: Option<&str>,
+) -> RollupDoc {
+    let id = match id_suffix {
+        Some(suffix) => format!(
+            "{}-{}-{}-{}",
+            metric,
+            resolution.as_str(),
+            bucket_start,
+            suffix
+        ),
+        None => format!("{}-{}-{}", metric, resolution.as_str(), bucket_start),
+    };
+
+    RollupDoc {
+        id,
+        bucket_start_ms: bucket_start,
+        bucket_end_ms: bucket_end,
+        timestamp_ms: bucket_start,
+        metric: metric.to_string(),
+        resolution: resolution.as_str().to_string(),
+        sample_count: 0,
+        cpu_min: None,
+        cpu_mean: None,
+        cpu_max: None,
+        load_1_min: None,
+        load_1_mean: None,
+        load_1_max: None,
+        mem_used_min: None,
+        mem_used_mean: None,
+        mem_used_max: None,
+        interface: None,
+        net_rx_min: None,
+        net_rx_mean: None,
+        net_rx_max: None,
+        net_tx_min: None,
+        net_tx_mean: None,
+        net_tx_max: None,
+        process_count_min: None,
+        process_count_mean: None,
+        process_count_max: None,
+        tcp_inuse_min: None,
+        tcp_inuse_mean: None,
+        tcp_inuse_max: None,
+        udp_inuse_min: None,
+        udp_inuse_mean: None,
+        udp_inuse_max: None,
+        total_sockets_min: None,
+        total_sockets_mean: None,
+        total_sockets_max: None,
+    }
+}
+
+/// Merge already-rolled-up source documents into a single min/mean/max.
+///
+/// Returns `(min, mean, max, total_sample_count)`. The mean is the
+/// `sample_count`-weighted mean of the per-bucket means; min/max are the min
+/// of the mins and the max of the maxes respectively. A source document with a
+/// missing/null field is skipped for that field (but still contributes its
+/// sample count).
+fn aggregate_rollup<'a>(
+    source_docs: impl Iterator<Item = &'a Document>,
+    min_field: &str,
+    mean_field: &str,
+    max_field: &str,
+) -> (Option<f64>, Option<f64>, Option<f64>, u64) {
+    let mut mins = Vec::new();
+    let mut maxs = Vec::new();
+    let mut weighted: Vec<(f64, u64)> = Vec::new();
+    let mut total_samples = 0u64;
+
+    for d in source_docs {
+        let samples = d
+            .get_i64("sample_count")
+            .ok()
+            .unwrap_or(0)
+            .max(0) as u64;
+        total_samples += samples;
+        // A zero sample count is nonsensical for a bucket with data; treat it
+        // as weight 1 so a mean still participates.
+        let weight = if samples == 0 { 1 } else { samples };
+
+        if let Some(v) = num_as_f64(d, min_field) {
+            mins.push(v);
+        }
+        if let Some(v) = num_as_f64(d, mean_field) {
+            weighted.push((v, weight));
+        }
+        if let Some(v) = num_as_f64(d, max_field) {
+            maxs.push(v);
+        }
+    }
+
+    (
+        min(&mins),
+        if weighted.is_empty() {
+            None
+        } else {
+            Some(weighted_mean(&weighted))
+        },
+        max(&maxs),
+        total_samples,
+    )
+}
+
+/// Weighted arithmetic mean of `(value, weight)` pairs.
+fn weighted_mean(values: &[(f64, u64)]) -> f64 {
+    let total_weight: u64 = values.iter().map(|(_, w)| w).sum();
+    if total_weight == 0 {
+        let sum: f64 = values.iter().map(|(v, _)| v).sum();
+        sum / values.len() as f64
+    } else {
+        let weighted_sum: f64 = values.iter().map(|(v, w)| v * (*w as f64)).sum();
+        weighted_sum / total_weight as f64
+    }
+}
+
 /// Extract a numeric field as f64 regardless of whether BSON stored it as
 /// int32, int64, or double.
 fn num_as_f64(doc: &Document, key: &str) -> Option<f64> {
@@ -514,6 +778,61 @@ fn cleanup_stale_empty_rollups(storage: &Storage) -> Result<(), String> {
     Ok(())
 }
 
+/// Remove empty daily/monthly/yearly rollup documents written before the
+/// multi-level rollup bug was fixed.
+///
+/// The bug: `compute_rollup` read *granular* field names (`cpu_percent`,
+/// `used_percent`, `rx_bytes_per_sec`, …) from its source documents even when
+/// the source was itself a rollup (hourly → daily, daily → monthly, monthly →
+/// yearly). Those sources carry aggregated fields (`cpu_mean`, `mem_used_mean`,
+/// `net_rx_mean`, …), so every second-and-higher level rollup was written with
+/// `sample_count > 0` but every min/mean/max field `null`.
+///
+/// MooFile's `$exists: false` matches both absent *and* null values, so each
+/// probe below only matches these stale empty documents — a real rollup always
+/// carries a non-null value for the field we probe. Deleting them resets the
+/// resume point so `run_rollups` re-rolls them correctly.
+fn cleanup_empty_upper_rollups(storage: &Storage) -> Result<(), String> {
+    for resolution in ["daily", "monthly", "yearly"] {
+        // cpu_percent is always present in granular CPU samples.
+        cleanup_empty_metric(storage, resolution, "cpu", bson::doc! { "cpu_mean": { "$exists": false } })?;
+        // used_percent is always present in granular memory/disk samples.
+        cleanup_empty_metric(storage, resolution, "memory", bson::doc! { "mem_used_mean": { "$exists": false } })?;
+        cleanup_empty_metric(storage, resolution, "disk", bson::doc! { "mem_used_mean": { "$exists": false } })?;
+        // rx/tx rates are present from the second granular sample on, so a real
+        // network rollup always has non-null means.
+        cleanup_empty_metric(storage, resolution, "network", bson::doc! {
+            "net_rx_mean": { "$exists": false },
+            "net_tx_mean": { "$exists": false },
+        })?;
+        // process_count is always present in granular sockets samples.
+        cleanup_empty_metric(storage, resolution, "sockets", bson::doc! { "process_count_mean": { "$exists": false } })?;
+    }
+
+    Ok(())
+}
+
+fn cleanup_empty_metric(
+    storage: &Storage,
+    resolution: &str,
+    metric: &str,
+    mut filter: bson::Document,
+) -> Result<(), String> {
+    filter.insert("metric", metric);
+
+    let deleted = storage.delete_many(resolution, filter)?;
+    if deleted > 0 {
+        tracing::info!(
+            "Cleaned up {} empty {} {} rollup document(s)",
+            deleted,
+            resolution,
+            metric
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,6 +883,7 @@ mod tests {
             1_700_000_000_000,
             1_700_003_600_000,
             Resolution::Hourly,
+            "granular",
         );
         assert_eq!(rollups.len(), 1);
         let r = &rollups[0];
@@ -592,6 +912,7 @@ mod tests {
             1_700_000_000_000,
             1_700_003_600_000,
             Resolution::Hourly,
+            "granular",
         );
         assert_eq!(rollups.len(), 1);
         assert_eq!(rollups[0].tcp_inuse_mean, Some(100.0));
@@ -617,7 +938,14 @@ mod tests {
         d3.insert("rx_bytes_per_sec", Bson::Double(50.0));
         d3.insert("tx_bytes_per_sec", Bson::Double(25.0));
 
-        let rollups = compute_rollup("network", &[d1, d2, d3], 0, 3_600_000, Resolution::Hourly);
+        let rollups = compute_rollup(
+            "network",
+            &[d1, d2, d3],
+            0,
+            3_600_000,
+            Resolution::Hourly,
+            "granular",
+        );
         assert_eq!(rollups.len(), 2);
         // BTreeMap ordering: eth0 sorts before wlan0.
         assert_eq!(rollups[0].interface.as_deref(), Some("eth0"));
@@ -639,11 +967,179 @@ mod tests {
         let mut d2 = Document::new();
         d2.insert("used_percent", Bson::Double(60.0));
 
-        let rollups = compute_rollup("disk", &[d1, d2], 0, 3_600_000, Resolution::Hourly);
+        let rollups = compute_rollup("disk", &[d1, d2], 0, 3_600_000, Resolution::Hourly, "granular");
         assert_eq!(rollups.len(), 1);
         let r = &rollups[0];
         assert_eq!(r.mem_used_mean, Some(50.0));
         assert_eq!(r.mem_used_min, Some(40.0));
         assert_eq!(r.mem_used_max, Some(60.0));
+    }
+
+    // Regression: the 7d/30d history bug. hourly → daily (and higher) rollups
+    // read granular field names from source docs that were already rollups,
+    // so every daily/monthly/yearly rollup was written empty. Merging rollups
+    // must produce min-of-mins, sample_count-weighted mean-of-means, and
+    // max-of-maxes.
+    #[test]
+    fn test_compute_rollup_from_rollup_cpu_weighted_mean() {
+        use bson::{Bson, Document};
+
+        let mut d1 = Document::new();
+        d1.insert("sample_count", Bson::Int64(120));
+        d1.insert("cpu_min", Bson::Double(1.0));
+        d1.insert("cpu_mean", Bson::Double(10.0));
+        d1.insert("cpu_max", Bson::Double(20.0));
+        d1.insert("load_1_min", Bson::Double(0.1));
+        d1.insert("load_1_mean", Bson::Double(0.5));
+        d1.insert("load_1_max", Bson::Double(1.0));
+
+        let mut d2 = Document::new();
+        d2.insert("sample_count", Bson::Int64(60)); // half as many samples
+        d2.insert("cpu_min", Bson::Double(5.0));
+        d2.insert("cpu_mean", Bson::Double(40.0));
+        d2.insert("cpu_max", Bson::Double(80.0));
+        d2.insert("load_1_min", Bson::Double(0.2));
+        d2.insert("load_1_mean", Bson::Double(0.7));
+        d2.insert("load_1_max", Bson::Double(1.5));
+
+        let rollups = compute_rollup(
+            "cpu",
+            &[d1, d2],
+            0,
+            86_400_000,
+            Resolution::Daily,
+            "hourly",
+        );
+        assert_eq!(rollups.len(), 1);
+        let r = &rollups[0];
+
+        // min-of-mins, max-of-maxes.
+        assert_eq!(r.cpu_min, Some(1.0));
+        assert_eq!(r.cpu_max, Some(80.0));
+        // weighted mean: (10*120 + 40*60) / 180 = (1200 + 2400)/180 = 20.0
+        assert_eq!(r.cpu_mean, Some(20.0));
+        // load_1 weighted mean: (0.5*120 + 0.7*60)/180 = (60 + 42)/180 = 0.5666…
+        assert!((r.load_1_mean.unwrap() - 0.56666666).abs() < 1e-6);
+        assert_eq!(r.load_1_min, Some(0.1));
+        assert_eq!(r.load_1_max, Some(1.5));
+        // sample_count is the sum of the source sample counts.
+        assert_eq!(r.sample_count, 180);
+    }
+
+    #[test]
+    fn test_compute_rollup_from_rollup_sockets_and_network() {
+        use bson::{Bson, Document};
+
+        // sockets
+        let mut s1 = Document::new();
+        s1.insert("sample_count", Bson::Int64(10));
+        s1.insert("process_count_min", Bson::Double(100.0));
+        s1.insert("process_count_mean", Bson::Double(105.0));
+        s1.insert("process_count_max", Bson::Double(110.0));
+        s1.insert("tcp_inuse_min", Bson::Double(8.0));
+        s1.insert("tcp_inuse_mean", Bson::Double(9.0));
+        s1.insert("tcp_inuse_max", Bson::Double(10.0));
+
+        let mut s2 = Document::new();
+        s2.insert("sample_count", Bson::Int64(10));
+        s2.insert("process_count_min", Bson::Double(120.0));
+        s2.insert("process_count_mean", Bson::Double(125.0));
+        s2.insert("process_count_max", Bson::Double(130.0));
+        s2.insert("tcp_inuse_min", Bson::Double(12.0));
+        s2.insert("tcp_inuse_mean", Bson::Double(13.0));
+        s2.insert("tcp_inuse_max", Bson::Double(14.0));
+
+        let rollups = compute_rollup(
+            "sockets",
+            &[s1, s2],
+            0,
+            86_400_000,
+            Resolution::Daily,
+            "hourly",
+        );
+        assert_eq!(rollups.len(), 1);
+        let r = &rollups[0];
+        assert_eq!(r.process_count_min, Some(100.0));
+        assert_eq!(r.process_count_mean, Some(115.0));
+        assert_eq!(r.process_count_max, Some(130.0));
+        assert_eq!(r.tcp_inuse_min, Some(8.0));
+        assert_eq!(r.tcp_inuse_mean, Some(11.0));
+        assert_eq!(r.tcp_inuse_max, Some(14.0));
+        assert_eq!(r.sample_count, 20);
+
+        // network: group by interface, merge per-interface.
+        let mut n1 = Document::new();
+        n1.insert("interface", Bson::String("eth0".to_string()));
+        n1.insert("sample_count", Bson::Int64(5));
+        n1.insert("net_rx_min", Bson::Double(0.0));
+        n1.insert("net_rx_mean", Bson::Double(100.0));
+        n1.insert("net_rx_max", Bson::Double(200.0));
+        n1.insert("net_tx_min", Bson::Double(50.0));
+        n1.insert("net_tx_mean", Bson::Double(60.0));
+        n1.insert("net_tx_max", Bson::Double(70.0));
+
+        let mut n2 = Document::new();
+        n2.insert("interface", Bson::String("eth0".to_string()));
+        n2.insert("sample_count", Bson::Int64(5));
+        n2.insert("net_rx_min", Bson::Double(10.0));
+        n2.insert("net_rx_mean", Bson::Double(300.0));
+        n2.insert("net_rx_max", Bson::Double(400.0));
+        n2.insert("net_tx_min", Bson::Double(80.0));
+        n2.insert("net_tx_mean", Bson::Double(90.0));
+        n2.insert("net_tx_max", Bson::Double(100.0));
+
+        let rollups = compute_rollup(
+            "network",
+            &[n1, n2],
+            0,
+            86_400_000,
+            Resolution::Daily,
+            "hourly",
+        );
+        assert_eq!(rollups.len(), 1);
+        let r = &rollups[0];
+        assert_eq!(r.interface.as_deref(), Some("eth0"));
+        assert_eq!(r.net_rx_min, Some(0.0));
+        assert_eq!(r.net_rx_mean, Some(200.0));
+        assert_eq!(r.net_rx_max, Some(400.0));
+        assert_eq!(r.net_tx_min, Some(50.0));
+        assert_eq!(r.net_tx_mean, Some(75.0));
+        assert_eq!(r.net_tx_max, Some(100.0));
+        assert_eq!(r.sample_count, 10);
+    }
+
+    #[test]
+    fn test_compute_rollup_from_rollup_empty_source_is_skipped() {
+        use bson::{Bson, Document};
+
+        // A buggy empty rollup (all value fields null) must not pollute the
+        // merged result. min/mean/max should come only from the valid doc.
+        let mut empty = Document::new();
+        empty.insert("sample_count", Bson::Int64(24));
+        empty.insert("cpu_min", Bson::Null);
+        empty.insert("cpu_mean", Bson::Null);
+        empty.insert("cpu_max", Bson::Null);
+
+        let mut good = Document::new();
+        good.insert("sample_count", Bson::Int64(24));
+        good.insert("cpu_min", Bson::Double(2.0));
+        good.insert("cpu_mean", Bson::Double(30.0));
+        good.insert("cpu_max", Bson::Double(90.0));
+
+        let rollups = compute_rollup(
+            "cpu",
+            &[empty, good],
+            0,
+            86_400_000,
+            Resolution::Daily,
+            "hourly",
+        );
+        assert_eq!(rollups.len(), 1);
+        let r = &rollups[0];
+        assert_eq!(r.cpu_min, Some(2.0));
+        assert_eq!(r.cpu_mean, Some(30.0));
+        assert_eq!(r.cpu_max, Some(90.0));
+        // sample_count still sums both buckets.
+        assert_eq!(r.sample_count, 48);
     }
 }

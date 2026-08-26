@@ -2,6 +2,33 @@
 
 All notable changes to TheWatcher will be documented in this file.
 
+## [0.1.4] — 2026-08-25
+
+### Fixed
+
+- **7d / 30d (and 1y) history empty** — `compute_rollup` read *granular* field
+  names (`cpu_percent`, `used_percent`, `rx_bytes_per_sec`, …) from its source
+  documents even when the source was itself a rollup. The hourly → daily,
+  daily → monthly, and monthly → yearly steps therefore aggregated the wrong
+  fields and wrote documents with `sample_count > 0` but every min/mean/max
+  value null. Since the 7d/30d/1y ranges resolve to the `daily`/`monthly`
+  collections, those ranges always returned empty while 1h (granular) and 24h
+  (hourly) worked. Rollup-to-rollup aggregation now merges min-of-mins,
+  max-of-maxes, and a `sample_count`-weighted mean-of-means. A one-time cleanup
+  removes the stale empty daily/monthly/yearly documents so they are rebuilt
+  from hourly on the next maintenance cycle.
+
+## [0.1.3] — 2026-08-17
+
+### Fixed
+
+- **Dashboard chart Y-axis** — percentage charts (CPU, memory, disk) are now
+  pinned to a fixed 0–100 range instead of being auto-scaled onto just the
+  spread of the data, so small fluctuations no longer get zoomed into a
+  misleading baseline. All other metrics (byte rates, process/socket counts,
+  load) can no longer produce a negative Y-axis — the lower bound is clamped at
+  0 since these values are inherently non-negative.
+
 ## [0.1.3] — 2026-08-14
 
 ### Fixed
