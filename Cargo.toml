@@ -1,6 +1,6 @@
 [package]
 name = "thewatcher"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "Self-hosted, single-binary system metrics viewer"
 license = "MIT"

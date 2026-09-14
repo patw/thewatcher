@@ -24,7 +24,7 @@ impl Default for Config {
             port: 8080,
             interval_secs: 30,
             data_dir: default_data_dir(),
-            granular_retention_days: 30,
+            granular_retention_days: 2,
             hourly_retention_days: 365,
             daily_retention_days: 1825,    // 5 years
             monthly_retention_days: 3650,  // 10 years

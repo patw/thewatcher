@@ -75,7 +75,7 @@ Options:
   --port PORT               HTTP port; default: 8080
   --interval DURATION       Collection interval (e.g. 5s, 30s, 1m); default: 30s
   --data-dir PATH           Directory for MooFiles; platform default
-  --granular-retention DUR  Retain granular samples; default: 30d
+  --granular-retention DUR  Retain granular samples; default: 2d
   --hourly-retention DUR    Retain hourly summaries; default: 365d
   --daily-retention DUR     Retain daily summaries; default: 5y
   --monthly-retention DUR   Retain monthly summaries; default: 10y

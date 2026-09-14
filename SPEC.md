@@ -137,7 +137,7 @@ thewatcher [OPTIONS]
 | `--port` | u16 | `8080` | TCP port |
 | `--interval` | duration | `30s` | Collection interval (e.g. `5s`, `1m`, `5m`) |
 | `--data-dir` | path | platform default | Directory for MooFiles |
-| `--granular-retention` | duration | `30d` | Granular sample retention |
+| `--granular-retention` | duration | `2d` | Granular sample retention |
 | `--hourly-retention` | duration | `365d` | Hourly summary retention |
 | `--daily-retention` | duration | `5y` | Daily summary retention |
 | `--monthly-retention` | duration | `10y` | Monthly summary retention |
@@ -1076,7 +1076,7 @@ WantedBy=multi-user.target
 
 | Resolution | Default Retention | Rationale |
 |---|---|---|
-| Granular | 30 days | Raw 30-second data is voluminous; 30 days gives a month of detail |
+| Granular | 2 days | Raw 30-second data is voluminous and moofile holds every live document decoded in RAM with no paging; the dashboard only ever queries granular data for ranges ≤1h (see Resolution auto-select), so 2 days is ample margin without paying for unreachable history |
 | Hourly | 365 days | One year of hourly precision for seasonal comparisons |
 | Daily | 5 years | Long-term trend visibility |
 | Monthly | 10 years | Capacity planning over a decade |

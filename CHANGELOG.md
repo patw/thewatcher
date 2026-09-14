@@ -2,6 +2,37 @@
 
 All notable changes to TheWatcher will be documented in this file.
 
+## [0.1.5] — 2026-09-14
+
+### Fixed
+
+- **Multi-GB memory use with a tiny metrics DB** — the systemd unit was
+  killed after climbing to a 3.6 GB RSS / 3.2 GB swap peak against a
+  ~175 MB data directory. Root cause: moofile keeps every live document
+  decoded in RAM with no paging, and `granular_retention_days` defaulted to
+  `30`. At the default 30s collection interval that's ~690k granular
+  documents at steady state, each costing ~3 KB in memory (a `bson::Bson`
+  is a 112-byte enum sized to its largest variant, so even a `bool` field
+  costs as much as a decimal128, plus a heap-allocated key) — but
+  `Resolution::auto_select` only ever reads granular data for ranges ≤1h,
+  and the dashboard's longest granular-eligible range is "Last hour". So
+  the default kept ~700x more raw data resident than any query could ever
+  reach. `granular_retention_days` now defaults to **2 days** (~140 MB,
+  ~46k docs) — comfortable margin over the 1-hour query window, at a
+  fraction of the memory. Every range ≥1h is served from the separate
+  hourly/daily/monthly/yearly rollup files and is unaffected.
+- Picked up `moofile-core` 1.2.3, which removes a related load-time doubling
+  (every record briefly existed twice — once in a scan buffer, once in the
+  index — while a collection was opening) and now returns freed heap arenas
+  to the OS after open. See moofile's changelog for detail.
+
+**Upgrade note:** the new default takes effect on next start; the existing
+retention/compaction background job then trims already-stored granular data
+down to the new 2-day window (starts ~1 hour after startup on the default
+maintenance schedule — see `maintenance_loop`). No manual data migration is
+needed. If you rely on `--granular-retention` for a longer raw-sample
+window, pass it explicitly; unaffected by this change.
+
 ## [0.1.4] — 2026-08-25
 
 ### Fixed

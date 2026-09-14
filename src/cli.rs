@@ -26,8 +26,15 @@ pub struct Cli {
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
 
-    /// Retain granular samples (e.g., 30d)
-    #[arg(long, default_value = "30d")]
+    /// Retain granular samples (e.g., 2d). The dashboard's longest range
+    /// that reads granular data is 1 hour (Resolution::auto_select falls
+    /// back to hourly rollups beyond that), so keeping 30 days of granular
+    /// samples by default meant holding ~700x more raw data in memory than
+    /// any query could reach — moofile keeps every live document decoded
+    /// in RAM with no paging, so that translated directly into multiple
+    /// GB of RSS. 2 days leaves a comfortable margin over what's queryable
+    /// while capping steady-state memory.
+    #[arg(long, default_value = "2d")]
     pub granular_retention: String,
 
     /// Retain hourly summaries (e.g., 365d)
