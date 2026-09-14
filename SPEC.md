@@ -1076,7 +1076,7 @@ WantedBy=multi-user.target
 
 | Resolution | Default Retention | Rationale |
 |---|---|---|
-| Granular | 2 days | Raw 30-second data is voluminous and moofile holds every live document decoded in RAM with no paging; the dashboard only ever queries granular data for ranges ≤1h (see Resolution auto-select), so 2 days is ample margin without paying for unreachable history |
+| Granular | 2 days | Raw 30-second data is voluminous and moofile holds every live document in RAM with no paging (raw BSON bytes as of moofile 1.2.4, ~1.65x the on-wire size rather than ~10x decoded); the dashboard only ever queries granular data for ranges ≤1h (see Resolution auto-select), so 2 days is ample margin without paying for unreachable history |
 | Hourly | 365 days | One year of hourly precision for seasonal comparisons |
 | Daily | 5 years | Long-term trend visibility |
 | Monthly | 10 years | Capacity planning over a decade |

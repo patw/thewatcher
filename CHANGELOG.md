@@ -2,6 +2,27 @@
 
 All notable changes to TheWatcher will be documented in this file.
 
+## [0.1.6] — 2026-09-14
+
+### Changed
+
+- **Picked up `moofile-core` 1.2.4** — the complete fix for the memory growth
+  that 0.1.5 only stop-gapped. moofile now holds documents as raw BSON bytes
+  instead of decoded `bson::Document`s, so a live document costs ~1.65x its
+  on-wire size instead of ~10x: RSS after open on the granular collection went
+  1965 MB → 418 MB (~4.7x), on top of the 3735 → 1965 MB that 1.2.3 bought.
+  Also picks up moofile 1.2.4's query-path fixes, which help exactly the
+  queries this service runs — the rollup shape `{metric, timestamp_ms: {$gte,
+  $lte}}` went 47–146 ms → 8–30 ms on that collection. No API change, no data
+  migration, and no `.bson.cache` version bump (1.2.3 and 1.2.4 read each
+  other's caches). Note moofile 1.2.4 is *slower* for two query shapes that
+  mainly affect the dashboard's "Last 24 hours" charts (the 24h sorted query
+  by 31–68%); see moofile's CHANGELOG for the measurements.
+- `granular_retention_days` stays at the **2 day** default chosen in 0.1.5.
+  Retaining granular data is now ~6x cheaper in memory than when that default
+  was set, but 2 days is still ~46x more than the longest granular query
+  (`Resolution::auto_select` only reads granular data for ranges ≤1h).
+
 ## [0.1.5] — 2026-09-14
 
 ### Fixed
